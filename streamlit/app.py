@@ -12,8 +12,11 @@ console = Console()
 class PromptTester:
     def __init__(self):
         # Load environment variables
-        load_dotenv('.env.id')
-        self.client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
+        load_dotenv('.env')
+        api_key = os.getenv('OPENAI_API_KEY')
+        if not api_key:
+            raise ValueError("OPENAI_API_KEY environment variable is not set")
+        self.client = OpenAI()  # Will automatically use OPENAI_API_KEY from environment
         
         # Initialize DynamoDB
         self.dynamodb = boto3.resource('dynamodb',
