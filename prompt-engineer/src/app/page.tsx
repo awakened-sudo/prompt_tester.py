@@ -4,13 +4,14 @@ import React, { useState, useEffect } from 'react';
 import { Chat } from '@/components/Chat/index';
 import { TestCase as TestCaseComponent } from '@/components/TestCase';
 import { DownloadButton } from '@/components/DownloadButton';
-import type { Message, TestCase as TestCaseType, APIMessage } from '@/types';
+import { PromptDiff } from '@/components/PromptDiff';
+import type { Message, APIMessage } from '@/types';
 import { extractPrompt } from '@/lib/utils';
 import toast from 'react-hot-toast';
 
 export default function Home() {
   const [messages, setMessages] = useState<Message[]>([]);
-  const [testCases, setTestCases] = useState<TestCaseType[]>([]);
+  const [testCases, setTestCases] = useState<TestCaseComponent[]>([]);
   const [currentPrompt, setCurrentPrompt] = useState<string>('');
   const [improvedPrompt, setImprovedPrompt] = useState<string>('');
   const [explanation, setExplanation] = useState<string>('');
@@ -26,7 +27,7 @@ export default function Home() {
       const allRated = testCases.every((test) => test.rating !== undefined);
       if (allRated) {
         setPhase('refining');
-        improvePrompt();
+        improvePrompt(testCases);
       }
     }
   }, [testCases, phase]);
@@ -89,8 +90,32 @@ export default function Home() {
       if (promptContent) {
         console.log('Extracted prompt:', promptContent);
         setCurrentPrompt(promptContent);
-        setPhase('testing');
-        await generateTestCases(promptContent);
+
+        // Update TEST_EXECUTOR assistant with the new prompt
+        try {
+          const updateResponse = await fetch('/api/update-assistant', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              assistantId: 'TEST_EXECUTOR',
+              instructions: `You are an AI assistant that executes test prompts. When given a prompt, respond naturally as if you were directly responding to that prompt. Do not mention that you are testing or evaluating - just respond to the prompt itself.
+
+Current Prompt:
+${promptContent}`,
+            }),
+          });
+
+          if (!updateResponse.ok) {
+            throw new Error('Failed to update assistant instructions');
+          }
+
+          console.log('Updated TEST_EXECUTOR with new prompt');
+          setPhase('testing');
+          await generateTestCases(promptContent);
+        } catch (error) {
+          console.error('Error updating TEST_EXECUTOR:', error);
+          toast.error('Failed to update test executor. Tests may not reflect the current prompt.');
+        }
       } else {
         console.log('No prompt found in message');
       }
@@ -141,46 +166,118 @@ export default function Home() {
     }
   };
 
-  const improvePrompt = async () => {
-    setIsImprovingPrompt(true);
+  const handleRateTestCase = async (testCaseId: string, rating: number, comments: string) => {
     try {
-      const response = await fetch('/api/improve-prompt', {
+      // Update local state
+      setTestCases(prev => prev.map(test => 
+        test.id === testCaseId ? { ...test, rating, comments } : test
+      ));
+
+      // Store evaluation
+      const response = await fetch('/api/store-evaluation', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          prompt: currentPrompt,
-          testCases,
+        body: JSON.stringify({ 
           threadId,
+          testCase: testCases.find(t => t.id === testCaseId) 
         }),
       });
 
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.error);
+      if (!response.ok) {
+        throw new Error('Failed to store evaluation');
+      }
 
-      setImprovedPrompt(data.improvedPrompt);
-      setExplanation(data.explanation);
-      toast.success('Prompt improved based on test results!');
+      // Check if all test cases are rated
+      const updatedTests = testCases.map(test => 
+        test.id === testCaseId ? { ...test, rating, comments } : test
+      );
+      
+      if (updatedTests.every(test => test.rating !== undefined)) {
+        setPhase('refining');
+        await improvePrompt(updatedTests);
+      }
+    } catch (error) {
+      console.error('Error rating test case:', error);
+      toast.error(error instanceof Error ? error.message : 'Failed to rate test case');
+    }
+  };
+
+  const improvePrompt = async (evaluatedTests: TestCaseComponent[]) => {
+    setIsImprovingPrompt(true);
+    try {
+      // Get refined prompt
+      const response = await fetch('/api/refine-prompt', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          originalPrompt: currentPrompt,
+          testCases: evaluatedTests,
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error('Failed to refine prompt');
+      }
+
+      const data = await response.json();
+      setImprovedPrompt(data.refinedPrompt);
+
+      // Update the TEST_EXECUTOR assistant with the refined prompt
+      const updateResponse = await fetch('/api/update-assistant', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          assistantId: 'TEST_EXECUTOR',
+          instructions: `You are an AI assistant that executes test prompts. When given a prompt, respond naturally as if you were directly responding to that prompt. Do not mention that you are testing or evaluating - just respond to the prompt itself.
+
+Current Prompt:
+${data.refinedPrompt}`,
+        }),
+      });
+
+      if (!updateResponse.ok) {
+        throw new Error('Failed to update assistant instructions');
+      }
+
+      toast.success('Prompt refined and assistant updated!');
     } catch (error) {
       console.error('Error improving prompt:', error);
-      toast.error('Failed to improve prompt');
+      toast.error(error instanceof Error ? error.message : 'Failed to improve prompt');
     } finally {
       setIsImprovingPrompt(false);
     }
   };
 
-  const handleRateTestCase = (rating: number, comments: string, testCaseId: string) => {
-    setTestCases((prev) =>
-      prev.map((test) =>
-        test.id === testCaseId ? { ...test, rating, comments } : test
-      )
-    );
+  const runAllTests = async () => {
+    try {
+      const promises = testCases.map(async (testCase) => {
+        const response = await fetch('/api/execute-test', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ prompt: currentPrompt, testCase }),
+        });
+
+        if (!response.ok) {
+          throw new Error(`Failed to execute test ${testCase.id}`);
+        }
+
+        const data = await response.json();
+        return data.testCase;
+      });
+
+      const updatedTestCases = await Promise.all(promises);
+      setTestCases(updatedTestCases);
+      toast.success('All tests completed!');
+    } catch (error) {
+      console.error('Error running all tests:', error);
+      toast.error(error instanceof Error ? error.message : 'Failed to run all tests');
+    }
   };
 
   const handleTestImprovedPrompt = async () => {
     if (!improvedPrompt) return;
     setCurrentPrompt(improvedPrompt);
     setImprovedPrompt('');
-    setExplanation('');
     setPhase('testing');
     await generateTestCases(improvedPrompt);
   };
@@ -220,53 +317,44 @@ export default function Home() {
           </h2>
           
           {phase === 'testing' && (
-            <div className="space-y-4">
-              {isGeneratingTests ? (
-                <div className="flex items-center justify-center h-32">
-                  <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500" />
-                </div>
-              ) : testCases.length === 0 ? (
-                <p className="text-gray-500 text-center py-8">
-                  No test cases generated yet. Complete the prompt engineering phase first.
-                </p>
-              ) : (
-                testCases.map((testCase) => (
+            <div className="space-y-6">
+              <div className="flex justify-between items-center">
+                <h2 className="text-2xl font-bold">Test Cases</h2>
+                <button
+                  onClick={runAllTests}
+                  className="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600 transition-colors"
+                >
+                  Run All Tests
+                </button>
+              </div>
+              <div className="grid gap-6">
+                {testCases.map((testCase) => (
                   <TestCaseComponent
                     key={testCase.id}
                     testCase={testCase}
-                    onRate={(rating, comments) => handleRateTestCase(rating, comments, testCase.id)}
+                    prompt={currentPrompt}
+                    onRate={handleRateTestCase}
                   />
-                ))
-              )}
+                ))}
+              </div>
             </div>
           )}
 
           {phase === 'refining' && (
-            <div className="space-y-4">
-              {isImprovingPrompt ? (
-                <div className="flex items-center justify-center h-32">
-                  <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500" />
-                </div>
-              ) : (
-                <>
-                  <div className="bg-white rounded-lg p-4 shadow">
-                    <h3 className="font-semibold mb-2">Improved Prompt</h3>
-                    <p className="whitespace-pre-wrap mb-4">{improvedPrompt}</p>
-                    <button
-                      onClick={handleTestImprovedPrompt}
-                      className="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600"
-                    >
-                      Test This Version
-                    </button>
-                  </div>
-                  {explanation && (
-                    <div className="bg-white rounded-lg p-4 shadow">
-                      <h3 className="font-semibold mb-2">Explanation of Changes</h3>
-                      <p className="whitespace-pre-wrap">{explanation}</p>
-                    </div>
-                  )}
-                </>
-              )}
+            <div className="space-y-6">
+              <h2 className="text-2xl font-bold">Prompt Refinement</h2>
+              <PromptDiff 
+                originalPrompt={currentPrompt}
+                refinedPrompt={improvedPrompt}
+              />
+              <div className="mt-6">
+                <button
+                  onClick={handleTestImprovedPrompt}
+                  className="w-full px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600"
+                >
+                  Test Refined Prompt
+                </button>
+              </div>
             </div>
           )}
         </div>
