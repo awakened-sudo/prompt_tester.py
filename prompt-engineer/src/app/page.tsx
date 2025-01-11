@@ -20,14 +20,14 @@ export default function Home() {
   const [phase, setPhase] = useState<'engineering' | 'testing' | 'refining'>('engineering');
   const [isGeneratingTests, setIsGeneratingTests] = useState(false);
   const [isImprovingPrompt, setIsImprovingPrompt] = useState(false);
+  const [showImprovePromptButton, setShowImprovePromptButton] = useState(false);
 
   // Check if all test cases are rated
   useEffect(() => {
     if (phase === 'testing' && testCases.length > 0) {
       const allRated = testCases.every((test) => test.rating !== undefined);
       if (allRated) {
-        setPhase('refining');
-        improvePrompt(testCases);
+        setShowImprovePromptButton(true);
       }
     }
   }, [testCases, phase]);
@@ -193,8 +193,7 @@ ${promptContent}`,
       );
       
       if (updatedTests.every(test => test.rating !== undefined)) {
-        setPhase('refining');
-        await improvePrompt(updatedTests);
+        setShowImprovePromptButton(true);
       }
     } catch (error) {
       console.error('Error rating test case:', error);
@@ -202,50 +201,63 @@ ${promptContent}`,
     }
   };
 
-  const improvePrompt = async (evaluatedTests: TestCaseComponent[]) => {
+  const handleImprovePrompt = async () => {
     setIsImprovingPrompt(true);
+    setShowImprovePromptButton(false);
     try {
-      // Get refined prompt
-      const response = await fetch('/api/refine-prompt', {
+      const response = await fetch('/api/improve-prompt', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+        },
         body: JSON.stringify({
-          originalPrompt: currentPrompt,
-          testCases: evaluatedTests,
+          currentPrompt,
+          testResults: testCases
         }),
       });
 
       if (!response.ok) {
-        throw new Error('Failed to refine prompt');
+        throw new Error('Failed to improve prompt');
       }
 
-      const data = await response.json();
-      setImprovedPrompt(data.refinedPrompt);
-
-      // Update the TEST_EXECUTOR assistant with the refined prompt
-      const updateResponse = await fetch('/api/update-assistant', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          assistantId: 'TEST_EXECUTOR',
-          instructions: `You are an AI assistant that executes test prompts. When given a prompt, respond naturally as if you were directly responding to that prompt. Do not mention that you are testing or evaluating - just respond to the prompt itself.
-
-Current Prompt:
-${data.refinedPrompt}`,
-        }),
-      });
-
-      if (!updateResponse.ok) {
-        throw new Error('Failed to update assistant instructions');
-      }
-
-      toast.success('Prompt refined and assistant updated!');
+      const { improvedPrompt: newImprovedPrompt } = await response.json();
+      setImprovedPrompt(newImprovedPrompt);
+      setPhase('refining'); 
+      toast.success('Prompt improved successfully');
     } catch (error) {
       console.error('Error improving prompt:', error);
-      toast.error(error instanceof Error ? error.message : 'Failed to improve prompt');
+      toast.error('Failed to improve prompt');
     } finally {
       setIsImprovingPrompt(false);
     }
+  };
+
+  const handleDownloadAndFinish = () => {
+    const content = {
+      finalPrompt: currentPrompt,
+      testResults: testCases.map(tc => ({
+        question: tc.question,
+        expectedBehavior: tc.expectedBehavior,
+        actualResponse: tc.actualResponse,
+        rating: tc.rating,
+        comments: tc.comments
+      })),
+      timestamp: new Date().toISOString()
+    };
+
+    const blob = new Blob([JSON.stringify(content, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `prompt-engineering-results-${new Date().toISOString().split('T')[0]}.json`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+
+    setShowImprovePromptButton(false);
+    toast.success('Results downloaded successfully');
   };
 
   const runAllTests = async () => {
@@ -322,7 +334,7 @@ ${data.refinedPrompt}`,
                 <h2 className="text-2xl font-bold">Test Cases</h2>
                 <button
                   onClick={runAllTests}
-                  className="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600 transition-colors"
+                  className="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600"
                 >
                   Run All Tests
                 </button>
@@ -337,6 +349,42 @@ ${data.refinedPrompt}`,
                   />
                 ))}
               </div>
+
+              {showImprovePromptButton && (
+                <div className="mt-8 flex flex-col items-center">
+                  <h3 className="text-xl font-medium text-gray-700 mb-6">
+                    What would you like to do with the test results?
+                  </h3>
+                  <div className="flex flex-col gap-4 w-full max-w-md">
+                    <button
+                      onClick={handleImprovePrompt}
+                      className="w-full py-3 px-6 bg-[#4ADE80] hover:bg-[#22C55E] text-white font-semibold rounded-lg text-lg transition-colors"
+                      disabled={isImprovingPrompt}
+                    >
+                      {isImprovingPrompt ? 'Improving...' : 'Improve Prompt'}
+                    </button>
+                    <button
+                      onClick={handleDownloadAndFinish}
+                      className="w-full py-3 px-6 bg-[#4F46E5] hover:bg-[#4338CA] text-white font-semibold rounded-lg text-lg transition-colors flex items-center justify-center gap-2"
+                    >
+                      <span>Download & Finish</span>
+                      <svg 
+                        className="w-5 h-5" 
+                        fill="none" 
+                        stroke="currentColor" 
+                        viewBox="0 0 24 24"
+                      >
+                        <path 
+                          strokeLinecap="round" 
+                          strokeLinejoin="round" 
+                          strokeWidth={2} 
+                          d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"
+                        />
+                      </svg>
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
@@ -347,12 +395,26 @@ ${data.refinedPrompt}`,
                 originalPrompt={currentPrompt}
                 refinedPrompt={improvedPrompt}
               />
-              <div className="mt-6">
+              <div className="flex gap-4 mt-6">
                 <button
-                  onClick={handleTestImprovedPrompt}
-                  className="w-full px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600"
+                  onClick={() => {
+                    setCurrentPrompt(improvedPrompt);
+                    setImprovedPrompt('');
+                    setPhase('testing');
+                    generateTestCases(improvedPrompt);
+                  }}
+                  className="px-6 py-2 bg-green-500 text-white rounded hover:bg-green-600"
                 >
-                  Test Refined Prompt
+                  Use Refined Prompt
+                </button>
+                <button
+                  onClick={() => {
+                    setImprovedPrompt('');
+                    setPhase('testing');
+                  }}
+                  className="px-6 py-2 bg-gray-500 text-white rounded hover:bg-gray-600"
+                >
+                  Keep Original
                 </button>
               </div>
             </div>

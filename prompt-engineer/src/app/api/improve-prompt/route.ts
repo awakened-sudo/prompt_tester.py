@@ -4,15 +4,13 @@ import type { TestCase } from '@/types';
 
 export async function POST(req: Request) {
   try {
-    const { prompt, testCases, threadId } = await req.json();
+    const { currentPrompt, testResults } = await req.json();
 
-    // Create a new thread if threadId is not provided
-    const thread = threadId
-      ? await openai.beta.threads.retrieve(threadId)
-      : await openai.beta.threads.create();
+    // Create a new thread
+    const thread = await openai.beta.threads.create();
 
     // Format test case results for the assistant
-    const testResults = testCases
+    const formattedTestResults = testResults
       .map((test: TestCase) => {
         if (test.rating === undefined) return null;
         return `Test: ${test.question}
@@ -28,24 +26,32 @@ Actual Response: ${test.actualResponse}`;
     // Add the message to the thread
     await openai.beta.threads.messages.create(thread.id, {
       role: 'user',
-      content: `Here is the current prompt:
-${prompt}
+      content: `You are a prompt engineering expert. Your task is to analyze test results and suggest improvements to the prompt.
 
-Here are the test results:
-${testResults}
+Current prompt:
+${currentPrompt}
 
-Please analyze these test results and suggest improvements to the prompt. Focus on:
-1. Addressing any failed test cases
-2. Improving clarity and specificity
-3. Adding any missing constraints or requirements
-4. Maintaining the successful aspects of the current prompt
+Test Results:
+${formattedTestResults}
 
-Provide the improved prompt in this format:
+Instructions:
+1. Analyze the test results carefully
+2. Identify areas where the prompt could be improved
+3. Create an improved version of the prompt that:
+   - Addresses any failed test cases
+   - Improves clarity and specificity
+   - Adds missing constraints or requirements
+   - Maintains successful aspects
+
+Your response MUST follow this EXACT format (do not use markdown code blocks or any other formatting):
+
 IMPROVED_PROMPT
-[Your improved prompt here]
+[Place your improved prompt here exactly as it should be used]
 END_PROMPT
 
-Then explain your changes and reasoning.`,
+[Then provide your explanation of the changes]
+
+IMPORTANT: Do not use any markdown formatting, code blocks, or special characters around the prompt. The markers IMPROVED_PROMPT and END_PROMPT must be on their own lines without any additional formatting.`,
     });
 
     // Run the assistant
@@ -53,47 +59,51 @@ Then explain your changes and reasoning.`,
       assistant_id: ASSISTANTS.EVALUATOR || '',
     });
 
-    // Poll for completion
-    let runStatus = await openai.beta.threads.runs.retrieve(thread.id, run.id);
-    while (runStatus.status === 'in_progress' || runStatus.status === 'queued') {
-      await new Promise((resolve) => setTimeout(resolve, 1000));
-      runStatus = await openai.beta.threads.runs.retrieve(thread.id, run.id);
+    // Wait for the run to complete
+    let completedRun = await openai.beta.threads.runs.retrieve(thread.id, run.id);
+    while (completedRun.status !== 'completed') {
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      completedRun = await openai.beta.threads.runs.retrieve(thread.id, run.id);
+      
+      if (completedRun.status === 'failed') {
+        throw new Error('Assistant run failed');
+      }
     }
 
-    // Get the messages
+    // Get the assistant's response
     const messages = await openai.beta.threads.messages.list(thread.id);
     const lastMessage = messages.data[0];
 
-    // Get text content from the message
-    const textContent = lastMessage.content.reduce((acc: string, c) => {
-      if (c.type === 'text') {
-        return acc + c.text.value;
-      }
-      return acc;
-    }, '');
-
-    if (!textContent) {
-      throw new Error('No text content found in response');
-    }
-
     // Extract the improved prompt
-    const improvedPromptMatch = textContent.match(/IMPROVED_PROMPT\n([\s\S]*?)\nEND_PROMPT/);
-    const improvedPrompt = improvedPromptMatch ? improvedPromptMatch[1].trim() : null;
+    const messageContent = lastMessage.content[0];
+    if (messageContent.type !== 'text') {
+      throw new Error('Unexpected message content type');
+    }
+    
+    const content = messageContent.text.value;
+    console.log('Assistant response:', content); // Debug log
 
-    if (!improvedPrompt) {
-      throw new Error('No improved prompt found in response');
+    // Remove any markdown code blocks
+    const cleanedContent = content.replace(/```[^`]*```/g, '');
+    
+    // Try to extract the prompt
+    const improvedPromptMatch = cleanedContent.match(/IMPROVED_PROMPT\n([\s\S]*?)\nEND_PROMPT/);
+    
+    if (!improvedPromptMatch) {
+      console.error('Failed to extract prompt. Full response:', content);
+      throw new Error('Could not extract improved prompt from response');
     }
 
-    // Extract the explanation (everything after END_PROMPT)
-    const explanation = textContent.split('END_PROMPT')[1]?.trim() || '';
+    const improvedPrompt = improvedPromptMatch[1].trim();
+    
+    // Validate that we got a non-empty prompt
+    if (!improvedPrompt) {
+      throw new Error('Extracted prompt is empty');
+    }
 
-    return NextResponse.json({
-      threadId: thread.id,
-      improvedPrompt,
-      explanation,
-    });
+    return NextResponse.json({ improvedPrompt });
   } catch (error) {
-    console.error('Error improving prompt:', error);
+    console.error('Error in improve-prompt:', error);
     return NextResponse.json(
       { error: 'Failed to improve prompt' },
       { status: 500 }
