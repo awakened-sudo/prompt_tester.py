@@ -1,19 +1,58 @@
 import { useState } from 'react';
-import { TestCase as TestCaseType } from '@/types';
+import toast from 'react-hot-toast';
 
-interface TestCaseProps {
-  testCase: TestCaseType;
-  onRate: (rating: number, comments: string) => void;
+export interface TestCase {
+  id: string;
+  question: string;
+  difficulty: number;
+  testingAspect: string;
+  expectedBehavior: string;
+  actualResponse: string;
+  rating?: number;
+  comments?: string;
 }
 
-export function TestCase({ testCase, onRate }: TestCaseProps) {
-  const [rating, setRating] = useState<number | null>(testCase.rating);
-  const [comments, setComments] = useState(testCase.comments);
+interface TestCaseProps {
+  testCase: TestCase;
+  prompt: string;
+  onRate: (testCaseId: string, rating: number, comments: string) => Promise<void>;
+}
 
-  const handleSubmit = (e: React.FormEvent) => {
+export function TestCase({ testCase, prompt, onRate }: TestCaseProps) {
+  const [rating, setRating] = useState<number | null>(testCase.rating || null);
+  const [comments, setComments] = useState<string>(testCase.comments || '');
+  const [isSubmitted, setIsSubmitted] = useState<boolean>(!!testCase.rating);
+  const [isExecuting, setIsExecuting] = useState<boolean>(false);
+  const [response, setResponse] = useState<string>(testCase.actualResponse || '');
+
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (rating !== null) {
-      onRate(rating, comments);
+      await onRate(testCase.id, rating, comments);
+      setIsSubmitted(true);
+    }
+  };
+
+  const executeTest = async () => {
+    setIsExecuting(true);
+    try {
+      const res = await fetch('/api/execute-test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt, testCase }),
+      });
+
+      if (!res.ok) {
+        throw new Error('Failed to execute test');
+      }
+
+      const data = await res.json();
+      setResponse(data.testCase.actualResponse);
+    } catch (error) {
+      console.error('Error executing test:', error);
+      toast.error(error instanceof Error ? error.message : 'Failed to execute test');
+    } finally {
+      setIsExecuting(false);
     }
   };
 
@@ -33,47 +72,70 @@ export function TestCase({ testCase, onRate }: TestCaseProps) {
         <p className="text-gray-600">
           <strong>Expected:</strong> {testCase.expectedBehavior}
         </p>
-        <div className="bg-gray-50 p-3 rounded">
-          <strong>Response:</strong>
-          <p className="mt-1">{testCase.actualResponse}</p>
-        </div>
       </div>
 
-      <form onSubmit={handleSubmit} className="space-y-4">
-        <div>
-          <label className="block text-sm font-medium text-gray-700">
-            Rating (1-10)
-          </label>
-          <input
-            type="number"
-            min={1}
-            max={10}
-            value={rating || ''}
-            onChange={(e) => setRating(Number(e.target.value))}
-            className="mt-1 block w-full rounded-md border-gray-300 shadow-sm"
-          />
-        </div>
-
-        <div>
-          <label className="block text-sm font-medium text-gray-700">
-            Comments
-          </label>
-          <textarea
-            value={comments}
-            onChange={(e) => setComments(e.target.value)}
-            className="mt-1 block w-full rounded-md border-gray-300 shadow-sm"
-            rows={3}
-          />
-        </div>
-
+      {!testCase.actualResponse && !response && (
         <button
-          type="submit"
-          className="w-full bg-blue-500 text-white py-2 px-4 rounded-md hover:bg-blue-600 disabled:opacity-50"
-          disabled={rating === null}
+          onClick={executeTest}
+          disabled={isExecuting}
+          className="w-full px-4 py-2 bg-green-500 text-white rounded hover:bg-green-600 disabled:opacity-50"
         >
-          Submit Evaluation
+          {isExecuting ? 'Running Test...' : 'Run Test'}
         </button>
-      </form>
+      )}
+
+      {(testCase.actualResponse || response) && (
+        <div className="bg-gray-50 p-3 rounded">
+          <strong>Response:</strong>
+          <p className="mt-1 whitespace-pre-wrap">{testCase.actualResponse || response}</p>
+        </div>
+      )}
+
+      {(testCase.actualResponse || response) && !isSubmitted && (
+        <form onSubmit={handleSubmit} className="space-y-4">
+          <div>
+            <label className="block text-sm font-medium text-gray-700">
+              Rating (1-10)
+            </label>
+            <input
+              type="number"
+              min={1}
+              max={10}
+              value={rating || ''}
+              onChange={(e) => setRating(e.target.value ? Number(e.target.value) : null)}
+              className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500"
+              required
+            />
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-gray-700">
+              Comments
+            </label>
+            <textarea
+              value={comments}
+              onChange={(e) => setComments(e.target.value)}
+              className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500"
+              rows={3}
+              placeholder="Add your feedback about the response..."
+              required
+            />
+          </div>
+
+          <button
+            type="submit"
+            className="w-full px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600"
+          >
+            Submit Evaluation
+          </button>
+        </form>
+      )}
+
+      {isSubmitted && (
+        <div className="text-green-500 font-medium text-center">
+          ✓ Evaluation submitted
+        </div>
+      )}
     </div>
   );
 }
